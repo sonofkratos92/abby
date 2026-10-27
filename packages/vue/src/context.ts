@@ -7,6 +7,7 @@ import {
   HttpService,
   type RemoteConfigValueString,
   type RemoteConfigValueStringToType,
+  type StorageServiceOptions,
   type ValidatorType,
 } from "@tryabby/core";
 import type { Infer } from "@tryabby/core/validation";
@@ -24,7 +25,7 @@ import {
   onUnmounted,
   provide,
   ref,
-   shallowRef,
+  shallowRef,
   watch,
 } from "vue";
 import {
@@ -68,61 +69,76 @@ export function createAbby<
 ) {
   const config = abbyConfig;
 
-  const abby = new Abby<
-    FlagName,
-    TestName,
-    Tests,
-    RemoteConfig,
-    RemoteConfigName,
-    string[],
-    User
-  >(
-    abbyConfig,
-    {
-      get: (key: string) => {
-        if (typeof window === "undefined") return null;
-        return TestStorageService.get(abbyConfig.projectId, key);
+  const createAbbyInstance = () =>
+    new Abby<
+      FlagName,
+      TestName,
+      Tests,
+      RemoteConfig,
+      RemoteConfigName,
+      string[],
+      User
+    >(
+      abbyConfig,
+      {
+        get: (key: string) => {
+          if (typeof window === "undefined") return null;
+          return TestStorageService.get(abbyConfig.projectId, key);
+        },
+        set: (key: string, value: any, options?: StorageServiceOptions) => {
+          if (typeof window === "undefined" || config.cookies?.disableByDefault)
+            return;
+          TestStorageService.set(abbyConfig.projectId, key, value, options);
+        },
       },
-      set: (key: string, value: any) => {
-        if (typeof window === "undefined" || config.cookies?.disableByDefault)
-          return;
-        TestStorageService.set(abbyConfig.projectId, key, value);
+      {
+        get: (key: string) => {
+          if (typeof window === "undefined") return null;
+          return FlagStorageService.get(abbyConfig.projectId, key);
+        },
+        set: (key: string, value: any) => {
+          if (typeof window === "undefined") return;
+          FlagStorageService.set(abbyConfig.projectId, key, value);
+        },
       },
-    },
-    {
-      get: (key: string) => {
-        if (typeof window === "undefined") return null;
-        return FlagStorageService.get(abbyConfig.projectId, key);
-      },
-      set: (key: string, value: any) => {
-        if (typeof window === "undefined") return;
-        FlagStorageService.set(abbyConfig.projectId, key, value);
-      },
-    },
-    {
-      get: (key: string) => {
-        if (typeof window === "undefined") return null;
-        return RemoteConfigStorageService.get(abbyConfig.projectId, key);
-      },
-      set: (key: string, value: any) => {
-        if (typeof window === "undefined") return;
-        RemoteConfigStorageService.set(abbyConfig.projectId, key, value);
-      },
-    }
-  );
+      {
+        get: (key: string) => {
+          if (typeof window === "undefined") return null;
+          return RemoteConfigStorageService.get(abbyConfig.projectId, key);
+        },
+        set: (key: string, value: any) => {
+          if (typeof window === "undefined") return;
+          RemoteConfigStorageService.set(abbyConfig.projectId, key, value);
+        },
+      }
+    );
 
+  const abby = createAbbyInstance();
+
+  type AbbyInstance = typeof abby;
   type AbbyProjectData = ReturnType<typeof abby.getProjectData>;
 
-  const AbbyInjectionKey: InjectionKey<Ref<AbbyProjectData>> = Symbol("AbbyContext");
+  interface AbbyScopedContext {
+    state: Ref<AbbyProjectData>;
+    abby: AbbyInstance;
+  }
 
-  // Shared reactive store fallback when used via Vue plugin or standalone composable
+  const AbbyInjectionKey: InjectionKey<AbbyScopedContext> =
+    Symbol("AbbyContext");
+
+  // Default fallback store when used without per-app initialData override
   const sharedState = shallowRef<AbbyProjectData>(abby.getProjectData());
   abby.subscribe((newData) => {
     sharedState.value = newData;
   });
 
-  const useAbbyData = (): Ref<AbbyProjectData> => {
-    return inject(AbbyInjectionKey, sharedState);
+  const defaultContext: AbbyScopedContext = {
+    state: sharedState,
+    abby,
+  };
+
+  const useAbbyContext = (): AbbyScopedContext => {
+    return inject(AbbyInjectionKey, defaultContext);
   };
 
   const useAbby = <
@@ -139,12 +155,8 @@ export function createAbby<
     variant: ComputedRef<ABTestReturnValue<Lookup, TestVariant>>;
     onAct: () => void;
   } => {
-    const dataRef = useAbbyData();
-    const selectedVariant = ref<string>(
-      dataRef.value.tests[name as unknown as TestName]?.selectedVariant ??
-        abby.getProjectData().tests[name as unknown as TestName]?.selectedVariant ??
-        ""
-    );
+    const { state: dataRef, abby: activeAbby } = useAbbyContext();
+    const selectedVariant = ref<string>("");
 
     const sendPing = (variantVal: string) => {
       if (!name || !variantVal) return;
@@ -171,7 +183,9 @@ export function createAbby<
 
     onMounted(() => {
       const current =
-        abby.getProjectData().tests[name as unknown as TestName]?.selectedVariant ??
+        dataRef.value.tests[name as unknown as TestName]?.selectedVariant ??
+        activeAbby.getProjectData().tests[name as unknown as TestName]
+          ?.selectedVariant ??
         selectedVariant.value;
       if (current) {
         selectedVariant.value = current;
@@ -208,16 +222,21 @@ export function createAbby<
   };
 
   const useFeatureFlag = (name: FlagName): ComputedRef<boolean> => {
-    const dataRef = useAbbyData();
-    return computed(() => dataRef.value.flags[name].value);
+    const { state: dataRef, abby: activeAbby } = useAbbyContext();
+    return computed(
+      () =>
+        dataRef.value.flags[name]?.value ?? activeAbby.getFeatureFlag(name)
+    );
   };
 
   const useFeatureFlags = () => {
-    const dataRef = useAbbyData();
+    const { state: dataRef, abby: activeAbby } = useAbbyContext();
     return computed(() =>
       (Object.keys(dataRef.value.flags) as Array<FlagName>).map((flagName) => ({
         name: flagName,
-        value: dataRef.value.flags[flagName].value,
+        value:
+          dataRef.value.flags[flagName]?.value ??
+          activeAbby.getFeatureFlag(flagName),
       }))
     );
   };
@@ -228,24 +247,28 @@ export function createAbby<
   >(
     remoteConfigName: T
   ): ComputedRef<RemoteConfigValueStringToType<Config>> => {
-    const dataRef = useAbbyData();
+    const { state: dataRef, abby: activeAbby } = useAbbyContext();
     return computed(
       () =>
-        dataRef.value.remoteConfig[remoteConfigName]
-          .value as RemoteConfigValueStringToType<Config>
+        (dataRef.value.remoteConfig[remoteConfigName]?.value ??
+          activeAbby.getRemoteConfig(
+            remoteConfigName
+          )) as RemoteConfigValueStringToType<Config>
     );
   };
 
   const useRemoteConfigVariables = () => {
-    const dataRef = useAbbyData();
+    const { state: dataRef, abby: activeAbby } = useAbbyContext();
     return computed(
       () =>
-        (Object.keys(dataRef.value.remoteConfig) as Array<RemoteConfigName>).map(
-          (configName) => ({
-            name: configName,
-            value: dataRef.value.remoteConfig[configName].value,
-          })
-        ) as Array<{
+        (
+          Object.keys(dataRef.value.remoteConfig) as Array<RemoteConfigName>
+        ).map((configName) => ({
+          name: configName,
+          value:
+            dataRef.value.remoteConfig[configName]?.value ??
+            activeAbby.getRemoteConfig(configName),
+        })) as Array<{
           name: RemoteConfigName;
           value: RemoteConfigValueStringToType<RemoteConfig[RemoteConfigName]>;
         }>
@@ -261,22 +284,25 @@ export function createAbby<
       },
     },
     setup(props, { slots }) {
+      const scopedAbby = props.initialData ? createAbbyInstance() : abby;
       const stateRef = shallowRef<AbbyProjectData>(
-        props.initialData ? abby.init(props.initialData) : abby.getProjectData()
+        props.initialData
+          ? scopedAbby.init(props.initialData)
+          : scopedAbby.getProjectData()
       );
 
-      provide(AbbyInjectionKey, stateRef);
+      provide(AbbyInjectionKey, { state: stateRef, abby: scopedAbby });
 
       let unsubscribe: (() => void) | undefined;
       onMounted(() => {
         if (!props.initialData) {
-          abby.loadProjectData().then((loaded) => {
+          scopedAbby.loadProjectData().then((loaded) => {
             if (loaded) {
               stateRef.value = loaded;
             }
           });
         }
-        unsubscribe = abby.subscribe((updated) => {
+        unsubscribe = scopedAbby.subscribe((updated) => {
           stateRef.value = updated;
         });
       });
@@ -290,14 +316,24 @@ export function createAbby<
   });
 
   const install = (app: App, options?: { initialData?: AbbyDataResponse }) => {
-    if (options?.initialData) {
-      sharedState.value = abby.init(options.initialData);
-    } else if (typeof window !== "undefined") {
-      abby.loadProjectData().then((loaded) => {
-        if (loaded) sharedState.value = loaded;
+    const scopedAbby = options?.initialData ? createAbbyInstance() : abby;
+    const appState = shallowRef<AbbyProjectData>(
+      options?.initialData
+        ? scopedAbby.init(options.initialData)
+        : scopedAbby.getProjectData()
+    );
+
+    scopedAbby.subscribe((updated) => {
+      appState.value = updated;
+    });
+
+    if (!options?.initialData && typeof window !== "undefined") {
+      scopedAbby.loadProjectData().then((loaded) => {
+        if (loaded) appState.value = loaded;
       });
     }
-    app.provide(AbbyInjectionKey, sharedState);
+
+    app.provide(AbbyInjectionKey, { state: appState, abby: scopedAbby });
   };
 
   const getFeatureFlagValue = (name: FlagName) => {
@@ -335,6 +371,7 @@ export function createAbby<
     return defineComponent({
       name: "AbbyDevtools",
       setup() {
+        const { abby: activeAbby } = useAbbyContext();
         let destroy: (() => void) | undefined;
         onMounted(() => {
           if (
@@ -343,7 +380,7 @@ export function createAbby<
           ) {
             return;
           }
-          destroy = factory.create({ ...props, abby });
+          destroy = factory.create({ ...props, abby: activeAbby });
         });
         onUnmounted(() => {
           if (destroy) destroy();

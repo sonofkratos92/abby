@@ -42,8 +42,9 @@ describe("@tryabby/vue integration", () => {
     );
   });
 
-  it("supports useFeatureFlag and useRemoteConfig with strong TypeScript inference", () => {
+  it("supports useFeatureFlag and useRemoteConfig inside component setup with TypeScript inference", () => {
     const {
+      AbbyProvider,
       useAbby,
       useFeatureFlag,
       useRemoteConfig,
@@ -65,22 +66,42 @@ describe("@tryabby/vue integration", () => {
 
     expect(getVariants("test")).toEqual(["OldFooter", "NewFooter"]);
 
-    const { variant } = useAbby("test");
-    expectTypeOf(variant.value).toEqualTypeOf<"OldFooter" | "NewFooter">();
-
     const mapped = getABTestValue("test", {
       OldFooter: 10,
       NewFooter: 20,
     });
     expectTypeOf(mapped).toEqualTypeOf<number>();
 
-    const flag = useFeatureFlag("flag1");
-    expectTypeOf(flag.value).toEqualTypeOf<boolean>();
+    const Probe = defineComponent({
+      setup() {
+        const { variant } = useAbby("test");
+        expectTypeOf(variant.value).toEqualTypeOf<"OldFooter" | "NewFooter">();
 
-    const rcStr = useRemoteConfig("remoteConfig1");
-    expectTypeOf(rcStr.value).toEqualTypeOf<string>();
+        const flag = useFeatureFlag("flag1");
+        expectTypeOf(flag.value).toEqualTypeOf<boolean>();
 
-    const rcNum = useRemoteConfig("maxItems");
-    expectTypeOf(rcNum.value).toEqualTypeOf<number>();
+        const rcStr = useRemoteConfig("remoteConfig1");
+        expectTypeOf(rcStr.value).toEqualTypeOf<string>();
+
+        const rcNum = useRemoteConfig("maxItems");
+        expectTypeOf(rcNum.value).toEqualTypeOf<number>();
+
+        return () =>
+          h(
+            "div",
+            { "data-testid": "probe" },
+            `${String(flag.value)}-${rcStr.value}-${rcNum.value}`
+          );
+      },
+    });
+
+    const Root = defineComponent({
+      setup() {
+        return () => h(AbbyProvider, null, { default: () => h(Probe) });
+      },
+    });
+
+    const { getByTestId } = render(Root);
+    expect(getByTestId("probe").textContent).toBe("false--0");
   });
 });
