@@ -20,6 +20,7 @@ import {
   type Ref,
   computed,
   defineComponent,
+  getCurrentInstance,
   inject,
   onMounted,
   onUnmounted,
@@ -114,19 +115,56 @@ export function createAbby<
     );
 
   const abby = createAbbyInstance();
+  let currentAbby = abby;
 
   type AbbyInstance = typeof abby;
   type AbbyProjectData = ReturnType<typeof abby.getProjectData>;
 
-  interface AbbyScopedContext {
+  const createImperativeApi = (targetAbby: AbbyInstance) => ({
+    abby: targetAbby,
+    getFeatureFlagValue: (name: FlagName) => targetAbby.getFeatureFlag(name),
+    getRemoteConfig: <
+      T extends RemoteConfigName,
+      Config extends RemoteConfig[T],
+    >(
+      remoteConfigName: T
+    ): RemoteConfigValueStringToType<Config> =>
+      targetAbby.getRemoteConfig(remoteConfigName),
+    getABTestValue: <
+      TestKey extends keyof Tests,
+      TestVariant extends Tests[TestKey]["variants"][number],
+      LookupValue,
+      const Lookup extends
+        | Record<TestVariant, LookupValue>
+        | undefined = undefined,
+    >(
+      testName: TestKey,
+      lookupObject?: Lookup
+    ): ABTestReturnValue<Lookup, TestVariant> => {
+      const variant = targetAbby.getTestVariant(testName);
+      if (lookupObject === undefined) {
+        return variant as any;
+      }
+      return lookupObject[variant as TestVariant] as any;
+    },
+    updateUserProperties: (
+      user: Partial<{
+        -readonly [K in keyof User]: Infer<User[K]>;
+      }>
+    ) => {
+      targetAbby.updateUserProperties(user);
+    },
+  });
+
+  type AbbyImperativeApi = ReturnType<typeof createImperativeApi>;
+
+  interface AbbyScopedContext extends AbbyImperativeApi {
     state: Ref<AbbyProjectData>;
-    abby: AbbyInstance;
   }
 
   const AbbyInjectionKey: InjectionKey<AbbyScopedContext> =
     Symbol("AbbyContext");
 
-  // Default fallback store when used without per-app initialData override
   const sharedState = shallowRef<AbbyProjectData>(abby.getProjectData());
   abby.subscribe((newData) => {
     sharedState.value = newData;
@@ -134,11 +172,17 @@ export function createAbby<
 
   const defaultContext: AbbyScopedContext = {
     state: sharedState,
-    abby,
+    ...createImperativeApi(abby),
   };
 
   const useAbbyContext = (): AbbyScopedContext => {
-    return inject(AbbyInjectionKey, defaultContext);
+    if (getCurrentInstance()) {
+      return inject(AbbyInjectionKey, defaultContext);
+    }
+    return {
+      state: sharedState,
+      ...createImperativeApi(currentAbby),
+    };
   };
 
   const useAbby = <
@@ -283,15 +327,18 @@ export function createAbby<
         required: false,
       },
     },
-    setup(props, { slots }) {
+    setup(props, { slots, expose }) {
       const scopedAbby = props.initialData ? createAbbyInstance() : abby;
+      currentAbby = scopedAbby;
       const stateRef = shallowRef<AbbyProjectData>(
         props.initialData
           ? scopedAbby.init(props.initialData)
           : scopedAbby.getProjectData()
       );
 
-      provide(AbbyInjectionKey, { state: stateRef, abby: scopedAbby });
+      const scopedApi = createImperativeApi(scopedAbby);
+      provide(AbbyInjectionKey, { state: stateRef, ...scopedApi });
+      expose(scopedApi);
 
       let unsubscribe: (() => void) | undefined;
       onMounted(() => {
@@ -317,6 +364,7 @@ export function createAbby<
 
   const install = (app: App, options?: { initialData?: AbbyDataResponse }) => {
     const scopedAbby = options?.initialData ? createAbbyInstance() : abby;
+    currentAbby = scopedAbby;
     const appState = shallowRef<AbbyProjectData>(
       options?.initialData
         ? scopedAbby.init(options.initialData)
@@ -333,11 +381,19 @@ export function createAbby<
       });
     }
 
-    app.provide(AbbyInjectionKey, { state: appState, abby: scopedAbby });
+    const scopedApi = createImperativeApi(scopedAbby);
+    const scopedContext: AbbyScopedContext = {
+      state: appState,
+      ...scopedApi,
+    };
+
+    app.provide(AbbyInjectionKey, scopedContext);
+    app.config.globalProperties.$abby = scopedContext;
+    return scopedApi;
   };
 
   const getFeatureFlagValue = (name: FlagName) => {
-    return abby.getFeatureFlag(name);
+    return useAbbyContext().getFeatureFlagValue(name);
   };
 
   const getRemoteConfig = <
@@ -346,7 +402,7 @@ export function createAbby<
   >(
     remoteConfigName: T
   ): RemoteConfigValueStringToType<Config> => {
-    return abby.getRemoteConfig(remoteConfigName);
+    return useAbbyContext().getRemoteConfig(remoteConfigName);
   };
 
   const getABTestValue = <
@@ -360,11 +416,7 @@ export function createAbby<
     testName: TestKey,
     lookupObject?: Lookup
   ): ABTestReturnValue<Lookup, TestVariant> => {
-    const variant = abby.getTestVariant(testName);
-    if (lookupObject === undefined) {
-      return variant as any;
-    }
-    return lookupObject[variant as TestVariant] as any;
+    return useAbbyContext().getABTestValue(testName, lookupObject);
   };
 
   const withDevtools: withDevtoolsFunction = (factory, props) => {
@@ -397,7 +449,7 @@ export function createAbby<
   };
 
   const getVariants = <T extends keyof Tests>(name: T) => {
-    return abby.getVariants(name);
+    return useAbbyContext().abby.getVariants(name);
   };
 
   const updateUserProperties = (
@@ -405,11 +457,12 @@ export function createAbby<
       -readonly [K in keyof User]: Infer<User[K]>;
     }>
   ) => {
-    abby.updateUserProperties(user);
+    useAbbyContext().updateUserProperties(user);
   };
 
   return {
     useAbby,
+    useAbbyContext,
     AbbyProvider,
     install,
     useFeatureFlag,
