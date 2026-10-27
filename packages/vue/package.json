@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsup src/",
     "dev": "pnpm run build --watch",
-    "test": "vitest",
+    "test": "tsc --noEmit && vitest run",
     "typecheck": "tsc --noEmit"
   },
   "homepage": "https://docs.tryabby.com",

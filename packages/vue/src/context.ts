@@ -349,6 +349,7 @@ export function createAbby<
             }
           });
         }
+        stateRef.value = scopedAbby.getProjectData();
         unsubscribe = scopedAbby.subscribe((updated) => {
           stateRef.value = updated;
         });
